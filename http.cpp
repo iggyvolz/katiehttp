@@ -1,9 +1,8 @@
 #ifdef _WIN32
-
-#include <windows.h>
+#include "http.hpp"
 #include <winsock2.h>
+#include <windows.h>
 #include <ws2tcpip.h>
-#pragma comment (lib, "Ws2_32.lib")
 
 #else
 
@@ -24,6 +23,11 @@
 #include <cstdlib>
 
 #include "http.h"
+
+#include <sstream>
+#include <thread>
+#include <vector>
+using namespace katiehttp;
 
 std::string reasonCode(const int code)
 {
@@ -114,9 +118,56 @@ void sends(SOCKET s,const std::string& data)
         len -= send(s, data.c_str(), len, 0); // TODO error check
     }
 }
+
+query parse_query(const std::string& string) {
+    query result {
+        .query_string = string
+    };
+    std::istringstream stream(string);
+    std::string token;
+    while(std::getline(stream, token, '&')) {
+        if(token.contains('=')) {
+            const size_t equals_pos = token.find('=');
+            result.parts.emplace(token.substr(0, equals_pos), token.substr(equals_pos+1));
+        }
+    }
+    return result;
+}
+
+path parse_path(const std::string & string) {
+    std::string local_path = string;
+    path result {
+        .path_string = local_path
+    };
+    if(local_path.contains('?')) {
+        const size_t question_mark_pos = local_path.find('?');
+        result.query = parse_query(local_path.substr(question_mark_pos+1));
+        local_path = local_path.substr(0, question_mark_pos);
+    } else {
+        result.query = std::nullopt;
+    }
+    std::istringstream stream(local_path);
+    std::string token;
+    while (std::getline(stream, token, '/')) {
+        if(!token.empty()) result.parts.push_back(token);
+    }
+    return result;
+}
+
+std::string trim(const std::string& str) {
+    size_t first = str.find_first_not_of(' ');
+    if (std::string::npos == first) {
+        return str;
+    }
+
+    size_t last = str.find_last_not_of(' ');
+    return str.substr(first, (last - first + 1));
+}
 // https://www.binarytides.com/code-tcp-socket-server-winsock/
-void http(int port, response (*handler)(const request))
+void katiehttp::http(int port, response_handler handler)
 {
+    std::vector<std::unique_ptr<std::thread>> threads;
+
     WSADATA wsa;
     
  
@@ -153,35 +204,39 @@ void http(int port, response (*handler)(const request))
         {
             continue;
         }
-        request req;
-        req.method = recvWord(clientSocket);
-        req.path = recvWord(clientSocket);
-        req.httpVersion = recvLine(clientSocket);
-        std::string headerLine = recvLine(clientSocket);
-        while(!headerLine.empty()) {
-            size_t colonPosition = headerLine.find(':');
-            std::string key = headerLine.substr(0, colonPosition);
-            std::string value = headerLine.substr(colonPosition + 2);
-            req.headers.try_emplace(key, value);
-            headerLine = recvLine(clientSocket);
-        }
-        auto contentLengthPosition = req.headers.find("Content-Length");
-        int bodyLength = contentLengthPosition == req.headers.end() ? 0 : std::stoi(contentLengthPosition->second);
-        std::string body = recvs(clientSocket, bodyLength);
-        response res = handler(req);
-        res.headers.try_emplace("Content-Length", std::to_string(res.body.length()));
-        sends(clientSocket, req.httpVersion + " " + std::to_string(res.responseCode) + " " + reasonCode(res.responseCode) + "\r\n");
-        for(auto &[key, value] : res.headers) {
-            sends(clientSocket, key);
-            sends(clientSocket, ": ");
-            sends(clientSocket, value);
+        threads.push_back(std::make_unique<std::thread>([clientSocket, handler] {
+            request req;
+            req.method = recvWord(clientSocket);
+            req.path = parse_path(recvWord(clientSocket));
+            req.httpVersion = recvLine(clientSocket);
+            std::string headerLine = recvLine(clientSocket);
+            while(!headerLine.empty()) {
+                size_t colonPosition = headerLine.find(':');
+                std::string key = headerLine.substr(0, colonPosition);
+                std::string value = trim(headerLine.substr(colonPosition + 1));
+                req.headers.emplace(key, value);
+                headerLine = recvLine(clientSocket);
+            }
+            auto contentLengthPosition = req.headers.find("Content-Length");
+            int bodyLength = contentLengthPosition == req.headers.end() ? 0 : std::stoi(contentLengthPosition->second);
+            std::string body = recvs(clientSocket, bodyLength);
+            response res = handler(&req);
+            res.headers.try_emplace("Content-Length", std::to_string(res.body.length()));
+            sends(clientSocket, req.httpVersion + " " + std::to_string(res.responseCode) + " " + reasonCode(res.responseCode) + "\r\n");
+            for(auto &[key, value] : res.headers) {
+                sends(clientSocket, key);
+                sends(clientSocket, ": ");
+                sends(clientSocket, value);
+                sends(clientSocket, "\r\n");
+            }
             sends(clientSocket, "\r\n");
-        }
-        sends(clientSocket, "\r\n");
-        sends(clientSocket, res.body);
-        //Reply to client
-        closesocket(clientSocket);
+            sends(clientSocket, res.body);
+            //Reply to client
+            closesocket(clientSocket);
+        }));
     }
+    for (auto& thread : threads) thread->join();
+
     WSACleanup();
 }
 
