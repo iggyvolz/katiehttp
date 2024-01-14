@@ -1,7 +1,7 @@
 #pragma once
-#include<string>
-#include<map>
-#include "../types.h"
+#include <cstdint>
+#include <string>
+#include <map>
 class request
 {
     public:
@@ -14,8 +14,8 @@ class request
 class response
 {
     public:
-        u16 responseCode = 200;
+        uint16_t responseCode = 200;
         std::map<std::string,std::string> headers;
-        std::string body = "";
+        std::string body;
 };
 void http(int port, response (*handler)(const request));

@@ -21,12 +21,11 @@
 #define WSAStartup(x,y) 0
 #define WSADATA int
 #endif
-#include <stdlib.h>
-#include <stdio.h>
+#include <cstdlib>
 
 #include "http.h"
 
-std::string reasonCode(int code)
+std::string reasonCode(const int code)
 {
     switch(code) {
         case 100: return "Continue";
@@ -70,13 +69,13 @@ std::string reasonCode(int code)
         case 503: return "Service Unavailable";
         case 504: return "Gateway Timeout";
         case 505: return "HTTP Version Not Supported";
+        default: return "Unknown";
     }
-    return "Unknown";
 }
 
 std::string recvs(SOCKET s, int len)
 {
-    char* buf = (char*)malloc(len);
+    char* buf = new char[len];
     int pos = 0;
     while(pos != len) {
         pos += recv(s, buf, len - pos, 0); // TODO error check
@@ -108,7 +107,7 @@ std::string recvLine(SOCKET s)
     recv(s, &lastChar, 1, 0); // get \n
     return line;
 }
-void sends(SOCKET s,const std::string data)
+void sends(SOCKET s,const std::string& data)
 {
     std::size_t len = data.size();
     while(len > 0) {
@@ -126,7 +125,7 @@ void http(int port, response (*handler)(const request))
         return; // TODO error check
     }
     SOCKET serverSocket, clientSocket;
-    struct sockaddr_in server, client;
+    sockaddr_in server{}, client{};
     //Create a socket
     if((serverSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
     {
@@ -139,7 +138,7 @@ void http(int port, response (*handler)(const request))
     server.sin_port = htons(port);
      
     //Bind
-    if( bind(serverSocket, (struct sockaddr *)&server , sizeof(server)) == SOCKET_ERROR)
+    if( bind(serverSocket, reinterpret_cast<sockaddr *>(&server) , sizeof(server)) == SOCKET_ERROR)
     {
         return; // TODO error check
     }
@@ -148,7 +147,7 @@ void http(int port, response (*handler)(const request))
     listen(serverSocket, 3);
      
     socklen_t size = sizeof(struct sockaddr_in);
-    while(clientSocket = accept(serverSocket, (struct sockaddr *)&client, &size))
+    while((clientSocket = accept(serverSocket, reinterpret_cast<sockaddr *>(&client), &size)))
     {
         if (clientSocket == INVALID_SOCKET)
         {
@@ -159,23 +158,24 @@ void http(int port, response (*handler)(const request))
         req.path = recvWord(clientSocket);
         req.httpVersion = recvLine(clientSocket);
         std::string headerLine = recvLine(clientSocket);
-        while(headerLine.length() > 0) {
-            int colonPosition = headerLine.find(":");
+        while(!headerLine.empty()) {
+            size_t colonPosition = headerLine.find(':');
             std::string key = headerLine.substr(0, colonPosition);
             std::string value = headerLine.substr(colonPosition + 2);
             req.headers.try_emplace(key, value);
             headerLine = recvLine(clientSocket);
         }
-        std::map<std::string, std::string>::iterator contentLengthPosition = req.headers.find("Content-Length");
+        auto contentLengthPosition = req.headers.find("Content-Length");
         int bodyLength = contentLengthPosition == req.headers.end() ? 0 : std::stoi(contentLengthPosition->second);
         std::string body = recvs(clientSocket, bodyLength);
         response res = handler(req);
         res.headers.try_emplace("Content-Length", std::to_string(res.body.length()));
         sends(clientSocket, req.httpVersion + " " + std::to_string(res.responseCode) + " " + reasonCode(res.responseCode) + "\r\n");
-        for(std::map<std::string, std::string>::iterator it = res.headers.begin(); it != res.headers.end(); it++) {
-            std::string key = it->first;
-            std::string value = it->second;
-            sends(clientSocket, key + ": " + value + "\r\n");
+        for(auto &[key, value] : res.headers) {
+            sends(clientSocket, key);
+            sends(clientSocket, ": ");
+            sends(clientSocket, value);
+            sends(clientSocket, "\r\n");
         }
         sends(clientSocket, "\r\n");
         sends(clientSocket, res.body);
